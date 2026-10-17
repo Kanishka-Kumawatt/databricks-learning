@@ -1,0 +1,76 @@
+# Phase 1.11 — a Databricks Asset Bundle job definition (resources/daily_revenue.job.yml).
+# Deploy with:  databricks bundle validate  &&  databricks bundle deploy -t dev
+# The notebooks referenced below are placeholders for your own code.
+
+resources:
+  jobs:
+    daily_revenue:
+      name: daily_revenue
+
+      # WHEN: every day at 05:00 Dubai time (Quartz cron: sec min hour day-of-month month day-of-week)
+      schedule:
+        quartz_cron_expression: "0 0 5 * * ?"
+        timezone_id: "Asia/Dubai"
+        pause_status: UNPAUSED
+
+      max_concurrent_runs: 1          # never let two runs of the same day overlap
+      timeout_seconds: 7200           # whole job must finish within 2 h
+
+      parameters:                     # job parameters are visible to every notebook task as widgets
+        - name: run_date
+          default: "{{job.start_time.iso_date}}"   # dynamic value reference; override for backfills
+
+      email_notifications:
+        on_failure: [data-eng-oncall@example.com]
+
+      health:                          # alert when the run is unusually slow (SLA early warning)
+        rules:
+          - metric: RUN_DURATION_SECONDS
+            op: GREATER_THAN
+            value: 3600
+
+      job_clusters:                    # job compute: created for the run, terminated after it
+        - job_cluster_key: etl
+          new_cluster:
+            spark_version: 16.4.x-scala2.12
+            node_type_id: Standard_D4ds_v5
+            num_workers: 2
+            data_security_mode: SINGLE_USER   # "Dedicated" access mode in the UI
+
+      tasks:
+        - task_key: ingest_orders
+          job_cluster_key: etl
+          notebook_task:
+            notebook_path: ../src/ingest_orders.py
+          max_retries: 2
+          min_retry_interval_millis: 300000   # wait 5 min between retries (transient errors)
+          timeout_seconds: 1800
+
+        - task_key: ingest_payments
+          job_cluster_key: etl
+          notebook_task:
+            notebook_path: ../src/ingest_payments.py
+          max_retries: 2
+          min_retry_interval_millis: 300000
+
+        - task_key: build_silver
+          depends_on:                         # fan-in: waits for BOTH ingestion tasks
+            - task_key: ingest_orders
+            - task_key: ingest_payments
+          job_cluster_key: etl
+          notebook_task:
+            notebook_path: ../src/build_silver.py
+
+        - task_key: build_gold_revenue
+          depends_on:
+            - task_key: build_silver
+          job_cluster_key: etl
+          notebook_task:
+            notebook_path: ../src/build_gold_revenue.py
+
+        - task_key: dq_and_reconciliation
+          depends_on:
+            - task_key: build_gold_revenue
+          job_cluster_key: etl
+          notebook_task:
+            notebook_path: ../src/dq_reconciliation.py   # raises an exception -> task fails -> alert

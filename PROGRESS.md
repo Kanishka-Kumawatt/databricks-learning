@@ -4,7 +4,7 @@ Status: ⬜ not started · 🟨 in progress · ✅ passed gate · 🔁 needs rev
 
 | Phase | Status | 🟢 Basic | 🟡 Medium | 🔴 Tricky | Notes |
 |---|---|---|---|---|---|
-| 1. DE foundations | 🟨 | – | – | – | 1.1 taught, awaiting answers |
+| 1. DE foundations | 🟨 | – | – | – | All 12 lessons + practicals written; answers pending |
 | 2. Spark core | ⬜ | | | | |
 | 3. Spark internals | ⬜ | | | | |
 | 4. PySpark & SQL | ⬜ | | | | |
