@@ -1,0 +1,157 @@
+# Phase 8.2 / 8.3 — multi-task Lakeflow Job (bundle resource).
+#
+#  check_landing ──▶ has_data (if/else) ──true──▶ refresh_pipeline ──▶ per_region_report (for each region) ──▶ publish_summary ─┐
+#                                     └──false──▶ no_data_alert ──────────────────────────────────────────────────────────────┴─▶ audit_log (ALL_DONE)
+#
+# Field names verified against the Jobs API / bundle task-type docs (Oct 2026). Notebook paths are relative to THIS file.
+
+resources:
+  jobs:
+    shopco_daily_orders:
+      name: shopco_daily_orders
+      description: Daily ShopCo order processing — check landing, refresh pipeline, per-region reports, audit.
+      tags:
+        team: data-eng
+        domain: orders
+
+      # ---------------- WHEN ----------------
+      schedule:                                   # time-based trigger (Quartz cron: sec min hour dom month dow)
+        quartz_cron_expression: "0 30 5 * * ?"
+        timezone_id: "Asia/Dubai"
+        pause_status: UNPAUSED                    # dev target (mode: development) pauses it automatically
+      # Alternatives (a job uses `schedule` OR `trigger`, choose one):
+      # trigger:
+      #   pause_status: UNPAUSED
+      #   file_arrival:                           # start when new files land in a UC volume / external location
+      #     url: /Volumes/main/de_prep/landing/orders/
+      #     min_time_between_triggers_seconds: 600
+      #     wait_after_last_change_seconds: 120   # wait for a batch of files to finish arriving
+      # trigger:
+      #   table_update:                           # start when upstream UC tables get new commits
+      #     table_names: [main.de_prep.partner_orders]
+      #     condition: ANY_UPDATED                # or ALL_UPDATED
+      # continuous:                               # always running: a new run starts when the previous ends
+      #   pause_status: UNPAUSED
+
+      # ---------------- RUN CONTROL ----------------
+      max_concurrent_runs: 1                      # never two runs of this job at once
+      queue:
+        enabled: true                             # a run that cannot start (concurrency/limits) waits instead of being skipped
+      timeout_seconds: 7200                       # whole run
+
+      health:                                     # SLA early warning (does not stop the run)
+        rules:
+          - metric: RUN_DURATION_SECONDS
+            op: GREATER_THAN
+            value: 3600
+
+      email_notifications:
+        on_failure: [ "${var.oncall_email}" ]
+        on_duration_warning_threshold_exceeded: [ "${var.oncall_email}" ]
+      notification_settings:
+        no_alert_for_skipped_runs: true
+        no_alert_for_canceled_runs: true
+
+      # ---------------- JOB PARAMETERS (pushed to every task; override per run for backfills) ----------------
+      parameters:
+        - name: run_date
+          default: "{{job.start_time.iso_date}}"  # dynamic value reference, resolved at run start (UTC date)
+        - name: landing_root
+          default: /Volumes/${var.catalog}/de_prep/landing/orders
+        - name: pipeline_schema
+          default: ${var.catalog}.${var.pipeline_schema}
+        - name: min_rows
+          default: "1"
+        - name: fail_when_empty
+          default: "false"
+
+      # ---------------- COMPUTE ----------------
+      # No cluster on the notebook tasks below -> they run on SERVERLESS jobs compute (if enabled in the workspace).
+      # Classic alternative: define a job cluster and add `job_cluster_key: etl` to each notebook task.
+      # job_clusters:
+      #   - job_cluster_key: etl
+      #     new_cluster:
+      #       spark_version: 16.4.x-scala2.12
+      #       node_type_id: Standard_D4ds_v5
+      #       num_workers: 2
+      #       data_security_mode: SINGLE_USER
+      # The pipeline task never uses these: a pipeline runs on its OWN compute (serverless or pipeline cluster).
+
+      tasks:
+        # 1) Profile the landing folder and publish task values row_count / regions.
+        - task_key: check_landing
+          notebook_task:
+            notebook_path: ./02a_check_landing.py
+          max_retries: 2                          # transient storage errors; the task is read-only -> safe to retry
+          min_retry_interval_millis: 60000
+          retry_on_timeout: true
+          timeout_seconds: 900
+
+        # 2) If/else: compare a task value with a job parameter. op uses enum names, not symbols.
+        - task_key: has_data
+          depends_on:
+            - task_key: check_landing
+          condition_task:
+            op: GREATER_THAN_OR_EQUAL
+            left: "{{tasks.check_landing.values.row_count}}"
+            right: "{{job.parameters.min_rows}}"
+
+        # 3) TRUE branch: refresh the declarative pipeline (incremental update, not a full refresh).
+        - task_key: refresh_pipeline
+          depends_on:
+            - task_key: has_data
+              outcome: "true"
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.shopco_orders_py.id}
+            full_refresh: false
+          max_retries: 1
+          timeout_seconds: 3600
+
+        # 4) For each region found by check_landing, run the nested notebook task (3 at a time).
+        - task_key: per_region_report
+          depends_on:
+            - task_key: refresh_pipeline
+          for_each_task:
+            inputs: "{{tasks.check_landing.values.regions}}"   # JSON array, e.g. ["IN","KSA","UAE"]
+            concurrency: 3
+            task:
+              task_key: per_region_report_iteration
+              notebook_task:
+                notebook_path: ./02b_region_report.py
+                base_parameters:
+                  region: "{{input}}"             # current element of the array
+              max_retries: 1                      # retries apply per iteration; the write is idempotent
+
+        # 5) FALSE branch: no data today.
+        - task_key: no_data_alert
+          depends_on:
+            - task_key: has_data
+              outcome: "false"
+          notebook_task:
+            notebook_path: ./02c_no_data_alert.py
+
+        # 6) Reconcile + publish. ALL_SUCCESS is the default run_if; written out for clarity.
+        - task_key: publish_summary
+          depends_on:
+            - task_key: per_region_report
+          run_if: ALL_SUCCESS
+          notebook_task:
+            notebook_path: ./02d_publish_summary.py
+          timeout_seconds: 900
+
+        # 7) Always record the run. One of its two upstreams is always Excluded (the branch not taken);
+        #    Excluded upstreams count as successful for run_if, and ALL_DONE also runs after failures.
+        - task_key: audit_log
+          depends_on:
+            - task_key: publish_summary
+            - task_key: no_data_alert
+          run_if: ALL_DONE
+          notebook_task:
+            notebook_path: ./02e_audit_log.py
+            base_parameters:                      # task parameters (job parameters win on a key clash)
+              job_id: "{{job.id}}"
+              job_run_id: "{{job.run_id}}"
+              task_run_id: "{{task.run_id}}"
+              trigger_type: "{{job.trigger.type}}"
+              repair_count: "{{job.repair_count}}"
+              landed_rows: "{{tasks.check_landing.values.row_count}}"

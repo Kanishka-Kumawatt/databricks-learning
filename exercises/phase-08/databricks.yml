@@ -1,0 +1,49 @@
+# Phase 8 — bundle root for the ShopCo job (8.2/8.3) and pipelines (8.5–8.7).
+# "Declarative Automation Bundles" is the current name of Databricks Asset Bundles (renamed 2026, CLI v0.287+;
+# same files, same `databricks bundle ...` commands).
+#
+#   databricks bundle validate                # schema + reference check (no deployment)
+#   databricks bundle deploy -t dev           # deploy to YOUR dev copy
+#   databricks bundle run shopco_orders_py -t dev      # run one pipeline update
+#   databricks bundle run shopco_daily_orders -t dev   # run the job
+#   databricks bundle deploy -t prod          # normally from CI/CD, never from a laptop
+
+bundle:
+  name: shopco_phase08
+
+include:
+  - "*.job.yml"
+  - "*.pipeline.yml"
+
+variables:
+  catalog:
+    description: Unity Catalog catalog for all outputs
+    default: main
+  pipeline_schema:
+    description: Default schema the pipeline publishes to
+    default: de_prep_sdp
+  oncall_email:
+    default: data-eng-oncall@example.com
+  prod_service_principal:
+    description: Application ID of the service principal that owns and runs production resources
+    default: "00000000-0000-0000-0000-000000000000"   # placeholder — set in CI, never commit real IDs
+
+targets:
+  dev:
+    mode: development       # prefixes resource names with "[dev <user>]", PAUSES schedules/triggers,
+    default: true           # and marks pipelines as development pipelines
+    # Avoid two developers writing the same schema:
+    variables:
+      pipeline_schema: de_prep_sdp_${workspace.current_user.short_name}
+
+  prod:
+    mode: production        # validates production practices (e.g. no personal paths, explicit run identity)
+    variables:
+      pipeline_schema: shopco_orders
+    run_as:                 # jobs and pipelines run as the service principal, not as the person who deployed
+      service_principal_name: ${var.prod_service_principal}
+    permissions:
+      - group_name: data-eng
+        level: CAN_MANAGE
+      - group_name: analysts
+        level: CAN_VIEW

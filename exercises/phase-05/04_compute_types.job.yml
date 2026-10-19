@@ -1,0 +1,95 @@
+# Phase 5.4 — one job, five compute choices (Declarative Automation Bundle, formerly Databricks Asset Bundle).
+# Put this file under resources/ of a bundle (see 11_bundle/). Reading exercise:
+#   databricks bundle validate -t dev        # must say "Validation OK!" once ids below are real
+# Do NOT deploy to shared or production workspaces. Notebook/SQL paths are placeholders.
+
+variables:
+  warehouse_id:
+    description: ID of a SQL warehouse (SQL Warehouses -> your warehouse -> Connection details / URL)
+  pool_id:
+    description: ID of an instance pool (Compute -> Pools)
+
+resources:
+  jobs:
+    shopco_compute_types_demo:
+      name: shopco_compute_types_demo
+      max_concurrent_runs: 1
+
+      job_clusters:
+        # (1) JOBS COMPUTE, multi node, Standard access mode (formerly "Shared"), Photon, autoscaling.
+        - job_cluster_key: etl_multi
+          new_cluster:
+            spark_version: 16.4.x-scala2.12          # pick the latest LTS your workspace lists
+            node_type_id: Standard_E8ds_v5           # memory-optimised Azure VM (8 vCPU, 64 GB)
+            autoscale:
+              min_workers: 2
+              max_workers: 6
+            data_security_mode: DATA_SECURITY_MODE_STANDARD   # legacy alias: USER_ISOLATION
+            runtime_engine: PHOTON                   # via API/bundles Photon must be explicit
+            azure_attributes:
+              availability: SPOT_WITH_FALLBACK_AZURE # workers on spot, fall back to on-demand
+              first_on_demand: 1                     # the driver (first node) stays on-demand
+              spot_bid_max_price: -1                 # pay up to the on-demand price
+            custom_tags:
+              team: shopco-de
+              cost_center: cc-1234
+
+        # (2) JOBS COMPUTE, SINGLE node, Dedicated access mode (formerly "Single user").
+        - job_cluster_key: small_single
+          new_cluster:
+            spark_version: 16.4.x-scala2.12
+            node_type_id: Standard_D4ds_v5           # general purpose (4 vCPU, 16 GB)
+            num_workers: 0
+            spark_conf:                              # these three settings make it single node;
+              spark.databricks.cluster.profile: singleNode   # without them 0 workers = no Spark
+              spark.master: "local[*, 4]"
+            custom_tags:
+              ResourceClass: SingleNode
+            data_security_mode: DATA_SECURITY_MODE_DEDICATED  # legacy alias: SINGLE_USER
+            # single_user_name: <user or service principal application id>  # optional; defaults to run identity (verify)
+
+        # (5) JOBS COMPUTE drawing nodes from an INSTANCE POOL (pool = warm VMs, not compute itself).
+        - job_cluster_key: etl_pool
+          new_cluster:
+            spark_version: 16.4.x-scala2.12
+            instance_pool_id: ${var.pool_id}         # workers from the pool
+            driver_instance_pool_id: ${var.pool_id}  # driver from the pool (use an on-demand pool)
+            num_workers: 2
+            data_security_mode: DATA_SECURITY_MODE_STANDARD
+
+      tasks:
+        # (3) No job_cluster_key / existing_cluster_id / environment -> SERVERLESS jobs compute
+        #     (requires Unity Catalog + serverless enabled for the workspace).
+        - task_key: ingest_serverless
+          notebook_task:
+            notebook_path: ../src/ingest_orders.py
+
+        - task_key: build_silver
+          depends_on: [{task_key: ingest_serverless}]
+          job_cluster_key: etl_multi
+          notebook_task:
+            notebook_path: ../src/build_silver.py
+
+        - task_key: reference_data
+          job_cluster_key: small_single
+          notebook_task:
+            notebook_path: ../src/load_reference_data.py
+
+        - task_key: backfill_helper
+          job_cluster_key: etl_pool
+          notebook_task:
+            notebook_path: ../src/backfill_helper.py
+
+        # (4) SQL WAREHOUSE — SQL tasks never run on a cluster.
+        - task_key: gold_sql
+          depends_on: [{task_key: build_silver}]
+          sql_task:
+            warehouse_id: ${var.warehouse_id}
+            file:
+              path: ../src/gold_revenue.sql
+
+        # (not recommended for production) running a task on existing ALL-PURPOSE compute:
+        # - task_key: adhoc_on_all_purpose
+        #   existing_cluster_id: 0123-456789-abcdefgh   # billed at the all-purpose DBU rate,
+        #   notebook_task:                              # shares state with interactive users
+        #     notebook_path: ../src/adhoc.py

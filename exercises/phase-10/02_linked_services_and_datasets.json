@@ -1,0 +1,136 @@
+{
+  "_comment": "Phase 10.2 study bundle (abbreviated). In a Git-integrated factory each resource below is its own file under linkedService/ or dataset/. Names are reused by lessons 10.3-10.8. Replace <...> placeholders. Connector property sets differ between legacy and newer connector versions - verify in your factory's JSON view.",
+  "linkedServices": [
+    {
+      "name": "LS_KeyVault",
+      "properties": {
+        "type": "AzureKeyVault",
+        "typeProperties": {
+          "baseUrl": "https://kv-shopco-dev.vault.azure.net"
+        }
+      }
+    },
+    {
+      "name": "LS_AzureSql_ShopCo",
+      "properties": {
+        "description": "Azure SQL source. No user/password in the connection string: the factory's system-assigned managed identity is used (create a contained database user for it and grant db_datareader + EXECUTE on the watermark procedure).",
+        "type": "AzureSqlDatabase",
+        "typeProperties": {
+          "connectionString": "Data Source=tcp:sql-shopco-dev.database.windows.net,1433;Initial Catalog=shopco_oltp;Connection Timeout=30"
+        },
+        "connectVia": {
+          "referenceName": "AutoResolveIntegrationRuntime",
+          "type": "IntegrationRuntimeReference"
+        }
+      }
+    },
+    {
+      "name": "LS_SqlServer_Inventory",
+      "properties": {
+        "description": "On-prem SQL Server reached through the self-hosted IR. Password comes from Key Vault.",
+        "type": "SqlServer",
+        "typeProperties": {
+          "connectionString": "Data Source=sql-inv-01;Initial Catalog=Inventory;Integrated Security=False;User ID=adf_reader;",
+          "password": {
+            "type": "AzureKeyVaultSecret",
+            "store": {
+              "referenceName": "LS_KeyVault",
+              "type": "LinkedServiceReference"
+            },
+            "secretName": "sql-inventory-adf-reader-password"
+          }
+        },
+        "connectVia": {
+          "referenceName": "SHIR-HeadOffice",
+          "type": "IntegrationRuntimeReference"
+        }
+      }
+    },
+    {
+      "name": "LS_ADLS_ShopCo",
+      "properties": {
+        "description": "ADLS Gen2. Only the url is given -> system-assigned managed identity. Grant it Storage Blob Data Contributor on the account (or ACLs on the landing container).",
+        "type": "AzureBlobFS",
+        "typeProperties": {
+          "url": "https://stshopcodev.dfs.core.windows.net"
+        }
+      }
+    }
+  ],
+  "datasets": [
+    {
+      "name": "DS_AzureSql_Query",
+      "properties": {
+        "description": "Generic Azure SQL dataset with no table: Lookup/Copy supply a query (sqlReaderQuery) instead.",
+        "type": "AzureSqlTable",
+        "linkedServiceName": {
+          "referenceName": "LS_AzureSql_ShopCo",
+          "type": "LinkedServiceReference"
+        },
+        "typeProperties": {}
+      }
+    },
+    {
+      "name": "DS_AzureSql_Table",
+      "properties": {
+        "description": "Parameterized table dataset for metadata-driven copies.",
+        "type": "AzureSqlTable",
+        "linkedServiceName": {
+          "referenceName": "LS_AzureSql_ShopCo",
+          "type": "LinkedServiceReference"
+        },
+        "parameters": {
+          "schemaName": { "type": "string" },
+          "tableName": { "type": "string" }
+        },
+        "typeProperties": {
+          "schema": { "value": "@dataset().schemaName", "type": "Expression" },
+          "table": { "value": "@dataset().tableName", "type": "Expression" }
+        }
+      }
+    },
+    {
+      "name": "DS_LandingParquet",
+      "properties": {
+        "description": "Parquet folder in the landing container; the caller passes the folder (for example orders/run_id=<RunId>).",
+        "type": "Parquet",
+        "linkedServiceName": {
+          "referenceName": "LS_ADLS_ShopCo",
+          "type": "LinkedServiceReference"
+        },
+        "parameters": {
+          "folderPath": { "type": "string" }
+        },
+        "typeProperties": {
+          "location": {
+            "type": "AzureBlobFSLocation",
+            "fileSystem": "landing",
+            "folderPath": { "value": "@dataset().folderPath", "type": "Expression" }
+          },
+          "compressionCodec": "snappy"
+        }
+      }
+    },
+    {
+      "name": "DS_LandingFolderBinary",
+      "properties": {
+        "description": "Binary folder dataset used by Get Metadata (exists / childItems) checks.",
+        "type": "Binary",
+        "linkedServiceName": {
+          "referenceName": "LS_ADLS_ShopCo",
+          "type": "LinkedServiceReference"
+        },
+        "parameters": {
+          "folderPath": { "type": "string" }
+        },
+        "typeProperties": {
+          "location": {
+            "type": "AzureBlobFSLocation",
+            "fileSystem": "landing",
+            "folderPath": { "value": "@dataset().folderPath", "type": "Expression" }
+          }
+        }
+      }
+    }
+  ]
+}

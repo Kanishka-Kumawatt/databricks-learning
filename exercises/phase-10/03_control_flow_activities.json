@@ -1,0 +1,195 @@
+{
+  "_comment": "Phase 10.3 study bundle (abbreviated, uses datasets from 02_linked_services_and_datasets.json). Three pipelines: metadata-driven master, its child, and a wait-for-file pattern. In a factory each pipeline is its own file under pipeline/.",
+  "pipelines": [
+    {
+      "name": "PL_Master_MetadataCopy",
+      "properties": {
+        "description": "Reads the list of enabled tables from etl.load_config and copies each one in parallel through a child pipeline.",
+        "activities": [
+          {
+            "name": "LookupTables",
+            "type": "Lookup",
+            "policy": { "timeout": "0.00:10:00", "retry": 1, "retryIntervalInSeconds": 60 },
+            "typeProperties": {
+              "source": {
+                "type": "AzureSqlSource",
+                "sqlReaderQuery": "SELECT source_schema, source_table, landing_folder, partition_column FROM etl.load_config WHERE enabled = 1"
+              },
+              "dataset": { "referenceName": "DS_AzureSql_Query", "type": "DatasetReference" },
+              "firstRowOnly": false
+            }
+          },
+          {
+            "name": "ForEachTable",
+            "type": "ForEach",
+            "dependsOn": [ { "activity": "LookupTables", "dependencyConditions": [ "Succeeded" ] } ],
+            "typeProperties": {
+              "items": { "value": "@activity('LookupTables').output.value", "type": "Expression" },
+              "isSequential": false,
+              "batchCount": 4,
+              "activities": [
+                {
+                  "name": "ExecChildCopy",
+                  "type": "ExecutePipeline",
+                  "typeProperties": {
+                    "pipeline": { "referenceName": "PL_Child_CopyTable", "type": "PipelineReference" },
+                    "waitOnCompletion": true,
+                    "parameters": {
+                      "schemaName": { "value": "@item().source_schema", "type": "Expression" },
+                      "tableName": { "value": "@item().source_table", "type": "Expression" },
+                      "landingFolder": { "value": "@item().landing_folder", "type": "Expression" },
+                      "partitionColumn": { "value": "@item().partition_column", "type": "Expression" }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "PL_Child_CopyTable",
+      "properties": {
+        "description": "Copies one table to a run-specific Parquet folder and returns the row count to the caller.",
+        "parameters": {
+          "schemaName": { "type": "string" },
+          "tableName": { "type": "string" },
+          "landingFolder": { "type": "string" },
+          "partitionColumn": { "type": "string" }
+        },
+        "activities": [
+          {
+            "name": "CopyTableToLanding",
+            "type": "Copy",
+            "policy": { "timeout": "0.02:00:00", "retry": 2, "retryIntervalInSeconds": 120 },
+            "typeProperties": {
+              "source": {
+                "type": "AzureSqlSource",
+                "sqlReaderQuery": {
+                  "value": "SELECT * FROM [@{pipeline().parameters.schemaName}].[@{pipeline().parameters.tableName}]",
+                  "type": "Expression"
+                },
+                "queryTimeout": "02:00:00",
+                "partitionOption": "DynamicRange",
+                "partitionSettings": {
+                  "partitionColumnName": { "value": "@pipeline().parameters.partitionColumn", "type": "Expression" }
+                }
+              },
+              "sink": {
+                "type": "ParquetSink",
+                "storeSettings": { "type": "AzureBlobFSWriteSettings" },
+                "formatSettings": { "type": "ParquetWriteSettings" }
+              },
+              "dataIntegrationUnits": 8,
+              "parallelCopies": 4
+            },
+            "inputs": [ { "referenceName": "DS_AzureSql_Query", "type": "DatasetReference" } ],
+            "outputs": [
+              {
+                "referenceName": "DS_LandingParquet",
+                "type": "DatasetReference",
+                "parameters": {
+                  "folderPath": {
+                    "value": "@{pipeline().parameters.landingFolder}/run_id=@{pipeline().RunId}",
+                    "type": "Expression"
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "name": "ReturnRowCount",
+            "type": "SetVariable",
+            "dependsOn": [ { "activity": "CopyTableToLanding", "dependencyConditions": [ "Succeeded" ] } ],
+            "typeProperties": {
+              "variableName": "pipelineReturnValue",
+              "setSystemVariable": true,
+              "value": [
+                {
+                  "key": "rows_copied",
+                  "value": { "type": "Expression", "content": "@activity('CopyTableToLanding').output.rowsCopied" }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "PL_WaitForPartnerFile",
+      "properties": {
+        "description": "Polls for today's partner folder every 5 minutes for up to 2 hours; fails with a clear message if it never arrives.",
+        "variables": {
+          "fileFound": { "type": "Boolean", "defaultValue": false }
+        },
+        "activities": [
+          {
+            "name": "WaitForPartnerFile",
+            "type": "Until",
+            "typeProperties": {
+              "expression": { "value": "@variables('fileFound')", "type": "Expression" },
+              "timeout": "0.02:00:00",
+              "activities": [
+                {
+                  "name": "CheckFolder",
+                  "type": "GetMetadata",
+                  "typeProperties": {
+                    "dataset": {
+                      "referenceName": "DS_LandingFolderBinary",
+                      "type": "DatasetReference",
+                      "parameters": {
+                        "folderPath": { "value": "partner/@{formatDateTime(utcnow(),'yyyy-MM-dd')}", "type": "Expression" }
+                      }
+                    },
+                    "fieldList": [ "exists" ]
+                  }
+                },
+                {
+                  "name": "SetFileFound",
+                  "type": "SetVariable",
+                  "dependsOn": [ { "activity": "CheckFolder", "dependencyConditions": [ "Succeeded" ] } ],
+                  "typeProperties": {
+                    "variableName": "fileFound",
+                    "value": { "value": "@activity('CheckFolder').output.exists", "type": "Expression" }
+                  }
+                },
+                {
+                  "name": "Wait5Min",
+                  "type": "Wait",
+                  "dependsOn": [ { "activity": "SetFileFound", "dependencyConditions": [ "Succeeded" ] } ],
+                  "typeProperties": { "waitTimeInSeconds": 300 }
+                }
+              ]
+            }
+          },
+          {
+            "name": "IfFileArrived",
+            "type": "IfCondition",
+            "dependsOn": [ { "activity": "WaitForPartnerFile", "dependencyConditions": [ "Completed" ] } ],
+            "typeProperties": {
+              "expression": { "value": "@variables('fileFound')", "type": "Expression" },
+              "ifTrueActivities": [
+                {
+                  "name": "ContinueProcessing",
+                  "type": "Wait",
+                  "typeProperties": { "waitTimeInSeconds": 1 }
+                }
+              ],
+              "ifFalseActivities": [
+                {
+                  "name": "FailNoPartnerFile",
+                  "type": "Fail",
+                  "typeProperties": {
+                    "message": { "value": "Partner file for @{formatDateTime(utcnow(),'yyyy-MM-dd')} not received within 2 hours", "type": "Expression" },
+                    "errorCode": "PARTNER_FILE_MISSING"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

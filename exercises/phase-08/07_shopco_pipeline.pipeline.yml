@@ -1,0 +1,64 @@
+# Phase 8.7 — pipeline settings as bundle resources (Lakeflow Spark Declarative Pipelines).
+# Two pipelines: the Python source and the SQL source define the SAME dataset names, so they publish to
+# different schemas. Field names follow the Pipelines API (bundle resource = API object in YAML).
+
+resources:
+  pipelines:
+    shopco_orders_py:
+      name: shopco_orders_py
+
+      # WHERE: default catalog + schema for every unqualified dataset name (default publishing mode).
+      # `target:` is the LEGACY field (legacy publishing mode / LIVE schema) — do not use it in new pipelines.
+      catalog: ${var.catalog}
+      schema: ${var.pipeline_schema}
+
+      # WHAT: the source files that define the dataflow graph. Plain .py / .sql files -> `file`.
+      # (`notebook: {path: ...}` for notebook sources; `glob: {include: transformations/**}` for a folder.)
+      libraries:
+        - file:
+            path: ./05_shopco_pipeline.py
+      root_path: .                         # pipeline root folder used by the Lakeflow Pipelines Editor
+
+      # Values readable with spark.conf.get(...) in Python and ${...} in SQL.
+      configuration:
+        shopco.landing_path: /Volumes/${var.catalog}/de_prep/landing/orders
+
+      # HOW IT RUNS
+      serverless: true                     # recommended; no cluster config, all features included
+      continuous: false                    # triggered: process what's available, then stop (job/schedule starts it)
+      channel: CURRENT                     # CURRENT (default) or PREVIEW runtime channel
+      # development: true                  # set automatically by `mode: development` targets; false in prod
+
+      # Publish the event log as a visible UC table (otherwise it is hidden; query with event_log('<id>')).
+      event_log:
+        catalog: ${var.catalog}
+        schema: ${var.pipeline_schema}
+        name: shopco_event_log
+
+      notifications:                       # pipeline-level alerts (verify alert names for your workspace)
+        - email_recipients: [ "${var.oncall_email}" ]
+          alerts: [ on-update-failure, on-update-fatal-failure, on-flow-failure ]
+
+      # CLASSIC compute alternative (instead of serverless: true):
+      # serverless: false
+      # edition: ADVANCED                  # CORE / PRO / ADVANCED; expectations need ADVANCED
+      # photon: true
+      # clusters:
+      #   - label: default
+      #     autoscale:
+      #       min_workers: 1
+      #       max_workers: 4
+      #       mode: ENHANCED
+
+    shopco_orders_sql:
+      name: shopco_orders_sql
+      catalog: ${var.catalog}
+      schema: ${var.pipeline_schema}_sql
+      libraries:
+        - file:
+            path: ./05_shopco_pipeline.sql
+      configuration:
+        shopco.landing_path: /Volumes/${var.catalog}/de_prep/landing/orders
+      serverless: true
+      continuous: false
+      channel: CURRENT

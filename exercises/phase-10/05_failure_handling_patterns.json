@@ -1,0 +1,128 @@
+{
+  "_comment": "Phase 10.5 study bundle (abbreviated). Wait activities stand in for real work so you can import and test the status logic: set the parameter forceFail=true to make the 'work' step fail (a Fail activity inside an If). Predict each run status before running.",
+  "pipelines": [
+    {
+      "name": "PL_Pattern_TryCatch",
+      "properties": {
+        "description": "Only an Upon Failure handler. Expected status: Succeeded in BOTH cases (failure is 'handled').",
+        "parameters": { "forceFail": { "type": "bool", "defaultValue": false } },
+        "activities": [
+          {
+            "name": "DoWork",
+            "type": "IfCondition",
+            "typeProperties": {
+              "expression": { "value": "@pipeline().parameters.forceFail", "type": "Expression" },
+              "ifTrueActivities": [
+                { "name": "SimulatedError", "type": "Fail", "typeProperties": { "message": "simulated failure", "errorCode": "SIM_FAIL" } }
+              ],
+              "ifFalseActivities": [
+                { "name": "SimulatedWork", "type": "Wait", "typeProperties": { "waitTimeInSeconds": 1 } }
+              ]
+            }
+          },
+          {
+            "name": "CatchLogError",
+            "type": "Wait",
+            "dependsOn": [ { "activity": "DoWork", "dependencyConditions": [ "Failed" ] } ],
+            "typeProperties": { "waitTimeInSeconds": 1 }
+          }
+        ]
+      }
+    },
+    {
+      "name": "PL_Pattern_DoIfElse",
+      "properties": {
+        "description": "Upon Success -> Next, Upon Failure -> Handler. Expected: Succeeded when work succeeds, Failed when work fails (Next is skipped, its parent failed).",
+        "parameters": { "forceFail": { "type": "bool", "defaultValue": false } },
+        "activities": [
+          {
+            "name": "DoWork",
+            "type": "IfCondition",
+            "typeProperties": {
+              "expression": { "value": "@pipeline().parameters.forceFail", "type": "Expression" },
+              "ifTrueActivities": [
+                { "name": "SimulatedError2", "type": "Fail", "typeProperties": { "message": "simulated failure", "errorCode": "SIM_FAIL" } }
+              ],
+              "ifFalseActivities": [
+                { "name": "SimulatedWork2", "type": "Wait", "typeProperties": { "waitTimeInSeconds": 1 } }
+              ]
+            }
+          },
+          {
+            "name": "NextStep",
+            "type": "Wait",
+            "dependsOn": [ { "activity": "DoWork", "dependencyConditions": [ "Succeeded" ] } ],
+            "typeProperties": { "waitTimeInSeconds": 1 }
+          },
+          {
+            "name": "Handler",
+            "type": "Wait",
+            "dependsOn": [ { "activity": "DoWork", "dependencyConditions": [ "Failed" ] } ],
+            "typeProperties": { "waitTimeInSeconds": 1 }
+          }
+        ]
+      }
+    },
+    {
+      "name": "PL_Pattern_GenericHandlerAndFail",
+      "properties": {
+        "description": "Sequential steps; one handler on the LAST step with Failed OR Skipped; then a Fail activity so the run stays red. Expected: Succeeded when all steps succeed; Failed (with one alert) when any step fails.",
+        "parameters": {
+          "forceFail": { "type": "bool", "defaultValue": false },
+          "alertUrl": { "type": "string", "defaultValue": "https://<logic-app-http-trigger-url>" }
+        },
+        "activities": [
+          {
+            "name": "Step1_Copy",
+            "type": "Wait",
+            "typeProperties": { "waitTimeInSeconds": 1 }
+          },
+          {
+            "name": "Step2_Transform",
+            "type": "IfCondition",
+            "dependsOn": [ { "activity": "Step1_Copy", "dependencyConditions": [ "Succeeded" ] } ],
+            "typeProperties": {
+              "expression": { "value": "@pipeline().parameters.forceFail", "type": "Expression" },
+              "ifTrueActivities": [
+                { "name": "SimulatedError3", "type": "Fail", "typeProperties": { "message": "simulated failure", "errorCode": "SIM_FAIL" } }
+              ],
+              "ifFalseActivities": [
+                { "name": "SimulatedWork3", "type": "Wait", "typeProperties": { "waitTimeInSeconds": 1 } }
+              ]
+            }
+          },
+          {
+            "name": "BuildSilver",
+            "type": "Wait",
+            "dependsOn": [ { "activity": "Step2_Transform", "dependencyConditions": [ "Succeeded" ] } ],
+            "typeProperties": { "waitTimeInSeconds": 1 }
+          },
+          {
+            "name": "SendFailureAlert",
+            "type": "WebActivity",
+            "dependsOn": [ { "activity": "BuildSilver", "dependencyConditions": [ "Failed", "Skipped" ] } ],
+            "policy": { "timeout": "0.00:10:00", "retry": 2, "retryIntervalInSeconds": 30, "secureInput": true },
+            "typeProperties": {
+              "method": "POST",
+              "url": { "value": "@pipeline().parameters.alertUrl", "type": "Expression" },
+              "headers": { "Content-Type": "application/json" },
+              "body": {
+                "value": "@json(concat('{\"factory\":\"', pipeline().DataFactory, '\",\"pipeline\":\"', pipeline().Pipeline, '\",\"runId\":\"', pipeline().RunId, '\",\"failedAtUtc\":\"', utcnow(), '\"}'))",
+                "type": "Expression"
+              }
+            }
+          },
+          {
+            "name": "FailPipeline",
+            "type": "Fail",
+            "dependsOn": [ { "activity": "SendFailureAlert", "dependencyConditions": [ "Succeeded" ] } ],
+            "typeProperties": {
+              "message": { "value": "Pipeline @{pipeline().Pipeline} failed (run @{pipeline().RunId}) - see activity runs", "type": "Expression" },
+              "errorCode": "PIPELINE_FAILED"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

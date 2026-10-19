@@ -1,0 +1,101 @@
+{
+  "_comment": "Phase 10.4 study bundle (abbreviated). Each trigger is its own file under trigger/ in a Git-integrated factory. Triggers are created Stopped - start them after publishing. Replace <...> placeholders.",
+  "triggers": [
+    {
+      "name": "TR_Daily_0200_UTC",
+      "properties": {
+        "description": "Nightly orders load. The watermark decides what to extract; the trigger only decides when.",
+        "type": "ScheduleTrigger",
+        "typeProperties": {
+          "recurrence": {
+            "frequency": "Day",
+            "interval": 1,
+            "startTime": "2026-10-20T00:00:00Z",
+            "timeZone": "UTC",
+            "schedule": { "hours": [ 2 ], "minutes": [ 0 ] }
+          }
+        },
+        "pipelines": [
+          {
+            "pipelineReference": { "referenceName": "PL_Orders_Incremental_To_Silver", "type": "PipelineReference" },
+            "parameters": {
+              "source_table": "dbo.orders"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "TR_Clickstream_Hourly",
+      "properties": {
+        "description": "Hourly windows with backfill from startTime, retry, and self-dependency (window t waits for t-1).",
+        "type": "TumblingWindowTrigger",
+        "typeProperties": {
+          "frequency": "Hour",
+          "interval": 1,
+          "startTime": "2026-10-11T00:00:00Z",
+          "delay": "00:15:00",
+          "maxConcurrency": 4,
+          "retryPolicy": { "count": 2, "intervalInSeconds": 300 },
+          "dependsOn": [
+            {
+              "type": "SelfDependencyTumblingWindowTriggerReference",
+              "offset": "-01:00:00",
+              "size": "01:00:00"
+            }
+          ]
+        },
+        "pipeline": {
+          "pipelineReference": { "referenceName": "PL_Clickstream_Hour", "type": "PipelineReference" },
+          "parameters": {
+            "windowStart": "@trigger().outputs.windowStartTime",
+            "windowEnd": "@trigger().outputs.windowEndTime"
+          }
+        }
+      }
+    },
+    {
+      "name": "TR_PartnerReturns_FileArrived",
+      "properties": {
+        "description": "Fires when the partner writes its _SUCCESS marker, not for every part file.",
+        "type": "BlobEventsTrigger",
+        "typeProperties": {
+          "blobPathBeginsWith": "/landing/blobs/partner/returns/",
+          "blobPathEndsWith": "_SUCCESS",
+          "ignoreEmptyBlobs": false,
+          "scope": "/subscriptions/<subscription-id>/resourceGroups/<rg>/providers/Microsoft.Storage/storageAccounts/stshopcodev",
+          "events": [ "Microsoft.Storage.BlobCreated" ]
+        },
+        "pipelines": [
+          {
+            "pipelineReference": { "referenceName": "PL_Partner_Returns", "type": "PipelineReference" },
+            "parameters": {
+              "sourceFolder": "@triggerBody().folderPath",
+              "markerFile": "@triggerBody().fileName"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "TR_ERP_ExportCompleted",
+      "properties": {
+        "description": "Custom Event Grid topic event published by the ERP team; payload carries the export path.",
+        "type": "CustomEventsTrigger",
+        "typeProperties": {
+          "scope": "/subscriptions/<subscription-id>/resourceGroups/<rg>/providers/Microsoft.EventGrid/topics/egt-shopco-erp",
+          "events": [ "ShopCo.Erp.ExportCompleted" ],
+          "subjectBeginsWith": "exports/inventory/"
+        },
+        "pipelines": [
+          {
+            "pipelineReference": { "referenceName": "PL_Erp_Inventory", "type": "PipelineReference" },
+            "parameters": {
+              "exportPath": "@triggerBody().event.data.exportPath"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}
